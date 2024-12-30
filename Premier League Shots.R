@@ -1,0 +1,125 @@
+devtools::install_github("JaseZiv/worldfootballR")
+
+library(worldfootballR)
+library(dplyr)
+library(tidyverse)
+library(shiny)
+library(ggplot2)
+
+epl_game_results <- understat_league_match_results(league="EPL",season_start_year = 2024)
+EPL_shots <- understat_league_season_shots("EPL", 2024)
+EPL_shots_adjusted <- EPL_shots %>%
+  mutate(X = X*105, Y = Y * 68) # most occuring pitch size in the EPL (in meters)
+unique_teams <- unique(c(EPL_shots_adjusted$home_team,EPL_shots_adjusted$away_team))
+
+ui <- fluidPage(
+  titlePanel("Soccer Shot Chart"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("team_name", "Enter Team Name:", choices = unique_teams, selected = ""),
+      selectInput("opponent_name", "Enter Opponent Name", choices = c(), selected = ""),
+      checkboxInput("only_goals", "Show Only Goals", value = FALSE),
+      actionButton("update_chart", "Update Shot Chart")
+    ),
+    
+    mainPanel(
+      plotOutput("shot_chart")
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  # Reactive function to get the teams the selected team has played against
+  get_opponents <- reactive({
+    req(input$team_name)  # Ensure team_name is selected
+    
+    # Filter for teams that have played against the selected team
+    opponents <- EPL_shots_adjusted %>%
+      filter(home_team == input$team_name | away_team == input$team_name) %>%
+      # Get the opposing teams (excluding the selected team)
+      mutate(opponent = ifelse(home_team == input$team_name, away_team, home_team)) %>%
+      pull(opponent) %>%
+      unique()
+    
+    opponents
+  })
+  
+  # Update opponent selectInput choices based on team_name
+  observe({
+    # Get the list of opponents for the selected team
+    opponents <- get_opponents()
+    
+    # Update the opponent_name selectInput choices
+    updateSelectInput(session, "opponent_name", choices = c("", opponents))
+  })
+  
+  # Generate a soccer field background for the shot chart
+  generate_soccer_field <- function() {
+    ggplot() +
+      geom_rect(aes(xmin = 0, xmax = 105, ymin = 0, ymax = 68), fill = "green", color = "white") +  # Full field
+      geom_rect(aes(xmin = 0, xmax = 5.5, ymin = 24.85, ymax = 43.15), fill = "transparent", color = "white") +  # Left penalty box
+      geom_rect(aes(xmin = 99.5, xmax = 105, ymin = 24.85, ymax = 43.15), fill = "transparent", color = "white") +  # Right penalty box
+      geom_rect(aes(xmin = 0, xmax = 16.5, ymin = 20.15, ymax = 47.85), fill = "transparent", color = "white") +  # Left goal area
+      geom_rect(aes(xmin = 88.5, xmax = 105, ymin = 20.15, ymax = 47.85), fill = "transparent", color = "white") +  # Right goal area
+      annotate("path", 
+               x = 52.5 + 9.15 * cos(seq(0, 2 * pi, length.out = 100)), 
+               y = 34 + 9.15 * sin(seq(0, 2 * pi, length.out = 100)), 
+               color = "white") +  # Center circle
+      geom_segment(aes(x = 52.5, xend = 52.5, y = 0, yend = 68), color = "white") +  # Halfway line
+      coord_fixed(ratio = 105 / 68) +  # Adjust field aspect ratio
+      theme_void()
+  }
+  
+  # Reactive data based on user input
+  filtered_shots <- reactive({
+    req(input$team_name)
+    
+    team_shots <- EPL_shots_adjusted %>%
+      filter(home_team == input$team_name | away_team == input$team_name)
+    
+    if (input$opponent_name != "") {
+      team_shots <- team_shots %>%
+        filter(home_team == input$opponent_name | away_team == input$opponent_name)
+    }
+    
+    if (input$only_goals) {
+      team_shots <- team_shots %>% filter(result == "Goal")
+    }
+    
+    team_shots
+  })
+  
+  # Render the shot chart
+  output$shot_chart <- renderPlot({
+    input$update_chart # Trigger update when button is pressed
+    
+    shots <- filtered_shots()
+    field <- generate_soccer_field()
+    
+    if (nrow(shots) == 0) {
+      field + ggtitle("No shots found for the selected filters")
+    } else {
+      field +
+        geom_point(
+          data = shots,
+          aes(x = X, y = Y, color = result), # shifted to show vertically
+          size = 3, alpha = 0.8
+        ) +
+        ggtitle(ifelse(input$team_name == "", "Shot Chart for All Teams", paste("Shot Chart for", input$team_name))) +
+        scale_color_manual(values = c("Goal" = "red", "MissedShot" = "blue", "SavedShot" = "yellow"))
+    }
+  })
+}
+
+# Run the application
+shinyApp(ui = ui, server = server)
+
+
+# Ideas:
+# 1) Add expected goals and team name labels on each half (would make home_team X = 180 - X, Y = 68 - Y)
+# 2) create player tabs for shooter and assist (maybe include shotType and lastAction also)
+# 3) avg_distance to the goal, number of games, number of shots, npxG, npG, Shot on Target %, Goal %
+# 4) Heat map for each player (adjusted to a vertical half)
+# 5) avg angle to goal (center of goal because I don't have data for where the shot was aimed)
+# 6) see if I can find data to merge to get formations and/or goalkeepers against
